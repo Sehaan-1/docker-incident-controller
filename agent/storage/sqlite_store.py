@@ -10,7 +10,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from agent.detector.rules import detect as _detect_candidates
 from agent.models.incident import (
     ActionRecord,
     ActionStatus,
@@ -94,6 +93,13 @@ class SQLiteStore:
         finally:
             conn.close()
 
+    @contextmanager
+    def transaction(self) -> Iterator[sqlite3.Connection]:
+        """Explicit transaction boundary for orchestrators to use."""
+        with self.connection() as conn:
+            yield conn
+
+
     def _create_schema(self, conn: sqlite3.Connection) -> None:
         statuses = ",".join(f"'{status.value}'" for status in IncidentStatus)
         conn.executescript(
@@ -157,7 +163,9 @@ class SQLiteStore:
             """
         )
 
-    def record_observations(self, observations: Iterable[Observation]) -> int:
+    def record_observations(
+        self, observations: Iterable[Observation], conn: sqlite3.Connection | None = None
+    ) -> int:
         rows = [
             (
                 encode_dt(observation.ts),
@@ -170,56 +178,28 @@ class SQLiteStore:
         if not rows:
             return 0
 
-        with self.connection() as conn:
-            conn.executemany(
-                """
-                INSERT INTO observations (ts, source, kind, payload_json)
-                VALUES (?, ?, ?, ?)
-                """,
-                rows,
-            )
+        query = """
+            INSERT INTO observations (ts, source, kind, payload_json)
+            VALUES (?, ?, ?, ?)
+        """
+        if conn is not None:
+            conn.executemany(query, rows)
+        else:
+            with self.connection() as c:
+                c.executemany(query, rows)
         return len(rows)
 
     # ------------------------------------------------------------------
     # Atomic observe → detect → persist pipeline
     # ------------------------------------------------------------------
 
-    def observe_and_persist_atomic(
-        self,
-        bundle: ObservationsBundle,
-    ) -> tuple[int, list[IncidentRecord]]:
-        """Record *bundle.observations* and persist any detected incident
-        candidates in a **single SQLite transaction**.
+    def create_incidents_from_candidates(
+        self, candidates: list[IncidentCandidate], conn: sqlite3.Connection | None = None
+    ) -> list[IncidentRecord]:
+        """Persist candidates. Caller may provide a connection to be inside a transaction."""
+        if not candidates:
+            return []
 
-        This eliminates the TOCTOU window that existed when
-        ``record_observations`` and ``create_incident_from_candidate_if_absent``
-        were called as separate operations (two connections, two commits).  A
-        crash between the two old calls could leave observations written but no
-        incident created, or — after a mid-INSERT failure — leave the DB in an
-        inconsistent state with no clear recovery path.
-
-        Returns
-        -------
-        (observation_count, created_incidents)
-            ``observation_count`` is the number of observation rows inserted.
-            ``created_incidents`` is the list of newly-created
-            :class:`IncidentRecord` objects (empty when all candidates already
-            have an active incident).
-        """
-        candidates: list[IncidentCandidate] = _detect_candidates(bundle)
-
-        obs_rows = [
-            (
-                encode_dt(obs.ts),
-                obs.source,
-                obs.kind,
-                encode_json(obs.payload),
-            )
-            for obs in bundle.observations
-        ]
-
-        # Prepare incident rows so all uuid generation happens before the
-        # transaction opens — keeps the critical section as short as possible.
         now = encode_dt(utc_now())
         candidate_rows = [
             (
@@ -235,47 +215,42 @@ class SQLiteStore:
         ]
 
         created_ids: list[str] = []
+        query = """
+            INSERT OR IGNORE INTO incidents (
+                id, type, status, summary, created_at, updated_at,
+                version, attempt_count, last_error_json
+            )
+            VALUES (?, ?, ?, ?, ?, ?, 0, 0, ?)
+        """
 
-        with self.connection() as conn:
-            # 1. Bulk-insert observations (idempotent autoincrement rows).
-            if obs_rows:
-                conn.executemany(
-                    """
-                    INSERT INTO observations (ts, source, kind, payload_json)
-                    VALUES (?, ?, ?, ?)
-                    """,
-                    obs_rows,
-                )
-
-            # 2. Attempt to INSERT each candidate; the partial UNIQUE index on
-            #    incidents(type) WHERE status IN active statuses makes conflicts
-            #    silent via INSERT OR IGNORE — same guard as the standalone
-            #    method.  Both steps share the same connection/transaction so
-            #    the commit is atomic across all rows.
+        def _execute(c: sqlite3.Connection):
             for incident_id, row in zip([r[0] for r in candidate_rows], candidate_rows):
-                cursor = conn.execute(
-                    """
-                    INSERT OR IGNORE INTO incidents (
-                        id, type, status, summary, created_at, updated_at,
-                        version, attempt_count, last_error_json
-                    )
-                    VALUES (?, ?, ?, ?, ?, ?, 0, 0, ?)
-                    """,
-                    row,
-                )
+                cursor = c.execute(query, row)
                 if cursor.rowcount == 1:
                     created_ids.append(incident_id)
 
-        # Read-back is done *after* the transaction commits so the rows are
-        # visible to any concurrent reader.
-        created: list[IncidentRecord] = []
-        for incident_id in created_ids:
-            record = self.get_incident(incident_id)
-            if record is None:
-                raise RuntimeError(f"created incident {incident_id} could not be read back")
-            created.append(record)
+        if conn is not None:
+            _execute(conn)
+        else:
+            with self.connection() as c:
+                _execute(c)
 
-        return len(obs_rows), created
+        created: list[IncidentRecord] = []
+
+        def _read_back(c: sqlite3.Connection):
+            for incident_id in created_ids:
+                row = c.execute("SELECT * FROM incidents WHERE id = ?", (incident_id,)).fetchone()
+                if row is None:
+                    raise RuntimeError(f"created incident {incident_id} could not be read back")
+                created.append(self._row_to_incident(row))
+
+        if conn is not None:
+            _read_back(conn)
+        else:
+            with self.connection() as c:
+                _read_back(c)
+
+        return created
 
     def list_observations(self, limit: int = 100) -> list[ObservationRecord]:
         with self.connection() as conn:

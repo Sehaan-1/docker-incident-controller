@@ -1,4 +1,4 @@
-"""Tests for SQLiteStore.observe_and_persist_atomic.
+"""Tests for RemediationOrchestrator atomicity.
 
 These tests verify that the observe→detect→persist pipeline is executed inside
 a *single* SQLite transaction so that a partial failure can never leave the
@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import sqlite3
 from datetime import UTC, datetime
-from unittest.mock import patch
+from unittest.mock import patch, MagicMock
 
 import pytest
 
@@ -17,6 +17,7 @@ from agent.models.incident import IncidentCandidate, IncidentStatus
 from agent.models.incident import IncidentType
 from agent.observer.observer import Observation, ObservationsBundle
 from agent.storage.sqlite_store import SQLiteStore
+from agent.pipeline.orchestrator import RemediationOrchestrator
 
 
 def _make_bundle(
@@ -47,6 +48,17 @@ def _make_bundle(
     )
 
 
+def _make_orchestrator(store: SQLiteStore) -> RemediationOrchestrator:
+    return RemediationOrchestrator(
+        observer_docker_client=MagicMock(),
+        observer_health_client=MagicMock(),
+        store=store,
+        planner_registry=MagicMock(),
+        health_url="http://nginx/health",
+        label_filters=[],
+    )
+
+
 # ---------------------------------------------------------------------------
 # Basic atomicity: both observations and incidents land together
 # ---------------------------------------------------------------------------
@@ -65,10 +77,13 @@ def test_atomic_pipeline_writes_observation_and_incident(tmp_path):
         summary="nginx is down",
         evidence=[{"status_code": 503}],
     )
-    with patch("agent.storage.sqlite_store._detect_candidates", return_value=[candidate]):
-        obs_count, created = store.observe_and_persist_atomic(bundle)
+    
+    orchestrator = _make_orchestrator(store)
+    
+    with patch("agent.pipeline.orchestrator.observe_once", return_value=bundle), \
+         patch("agent.pipeline.orchestrator.detect_candidates", return_value=[candidate]):
+        created = orchestrator.run_pass()
 
-    assert obs_count == 1
     assert len(created) == 1
     assert created[0].type == IncidentType.NGINX_CONFIG_ERROR.value
     assert created[0].status == IncidentStatus.OPEN
@@ -85,10 +100,12 @@ def test_atomic_pipeline_no_candidates(tmp_path):
 
     bundle = _make_bundle(kind="container", payload={"state": "running"})
 
-    with patch("agent.storage.sqlite_store._detect_candidates", return_value=[]):
-        obs_count, created = store.observe_and_persist_atomic(bundle)
+    orchestrator = _make_orchestrator(store)
+    
+    with patch("agent.pipeline.orchestrator.observe_once", return_value=bundle), \
+         patch("agent.pipeline.orchestrator.detect_candidates", return_value=[]):
+        created = orchestrator.run_pass()
 
-    assert obs_count == 1
     assert created == []
     assert len(store.list_observations()) == 1
     assert len(store.list_incidents()) == 0
@@ -105,9 +122,12 @@ def test_atomic_pipeline_deduplicates_active_incident(tmp_path):
         evidence=[],
     )
 
-    with patch("agent.storage.sqlite_store._detect_candidates", return_value=[candidate]):
-        _, first = store.observe_and_persist_atomic(_make_bundle())
-        _, second = store.observe_and_persist_atomic(_make_bundle())
+    orchestrator = _make_orchestrator(store)
+    
+    with patch("agent.pipeline.orchestrator.observe_once", return_value=_make_bundle()), \
+         patch("agent.pipeline.orchestrator.detect_candidates", return_value=[candidate]):
+        first = orchestrator.run_pass()
+        second = orchestrator.run_pass()
 
     assert len(first) == 1
     assert len(second) == 0  # duplicate suppressed by partial UNIQUE index
@@ -158,10 +178,13 @@ def test_atomic_pipeline_rolls_back_on_incident_insert_error(tmp_path):
 
         return _FailingConn()
 
+    orchestrator = _make_orchestrator(store)
+    
     with patch.object(store, "connection", side_effect=_failing_connection):
         with pytest.raises(sqlite3.OperationalError, match="injected failure"):
-            with patch("agent.storage.sqlite_store._detect_candidates", return_value=[candidate]):
-                store.observe_and_persist_atomic(_make_bundle())
+            with patch("agent.pipeline.orchestrator.observe_once", return_value=_make_bundle()), \
+                 patch("agent.pipeline.orchestrator.detect_candidates", return_value=[candidate]):
+                orchestrator.run_pass()
 
     # Both tables must be empty — the transaction was rolled back.
     assert store.list_observations() == []
@@ -183,10 +206,12 @@ def test_atomic_pipeline_multiple_candidates(tmp_path):
         IncidentCandidate(type=IncidentType.APP_CRASH_LOOP, summary="app crashing", evidence=[]),
     ]
 
-    with patch("agent.storage.sqlite_store._detect_candidates", return_value=candidates):
-        obs_count, created = store.observe_and_persist_atomic(_make_bundle())
+    orchestrator = _make_orchestrator(store)
+    
+    with patch("agent.pipeline.orchestrator.observe_once", return_value=_make_bundle()), \
+         patch("agent.pipeline.orchestrator.detect_candidates", return_value=candidates):
+        created = orchestrator.run_pass()
 
-    assert obs_count == 1
     assert len(created) == 2
     types = {r.type for r in created}
     assert IncidentType.NGINX_CONFIG_ERROR.value in types

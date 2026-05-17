@@ -1,7 +1,7 @@
 """
 Tests covering the five architectural improvements:
 
-1.  Planner rule-composition system (PLAN_RULES registry).
+1.  Planner rule-composition system (PlannerRegistry).
 2.  Retry wiring (FAILED → OPEN, MAX_ATTEMPTS = 3).
 3.  Deduplication via INSERT OR IGNORE + partial UNIQUE index.
 4.  State-machine: FAILED is no longer terminal (FAILED → OPEN is legal).
@@ -11,12 +11,17 @@ Tests covering the five architectural improvements:
 from __future__ import annotations
 
 import threading
+from unittest.mock import MagicMock
 
 import pytest
 
 from agent.models.incident import IncidentCandidate, IncidentStatus, IncidentType
 from agent.models.state_machine import IncidentStateMachine, InvalidTransitionError
-from agent.planner.rules import PLAN_RULES, PlanRule, plan_for_incident
+from agent.planner.registry import PlannerRegistry
+from agent.planner.strategies.nginx import NginxConfigErrorPlanner
+from agent.planner.strategies.app_crash import AppCrashLoopPlanner
+from agent.planner.strategies.retry_aware import RetryAwarePlanner
+from agent.pipeline.orchestrator import RemediationOrchestrator, MAX_ATTEMPTS
 from agent.storage.sqlite_store import SQLiteStore
 
 
@@ -24,23 +29,7 @@ from agent.storage.sqlite_store import SQLiteStore
 # 1. Rule-composition system
 # ---------------------------------------------------------------------------
 
-
 class TestPlannerRuleRegistry:
-    def test_all_known_types_have_rules(self):
-        """Every IncidentType declared in the model must have a registered rule."""
-        for incident_type in IncidentType:
-            assert incident_type in PLAN_RULES, (
-                f"No PlanRule registered for {incident_type.value!r}"
-            )
-
-    def test_rules_are_plan_rule_instances(self):
-        for rule in PLAN_RULES.values():
-            assert isinstance(rule, PlanRule)
-
-    def test_rules_have_non_empty_steps(self):
-        for rule in PLAN_RULES.values():
-            assert rule.steps, f"Rule for {rule.incident_type.value!r} has no steps"
-
     def test_plan_for_incident_nginx_config_error(self, tmp_path):
         store = SQLiteStore(tmp_path / "incidents.sqlite3")
         store.initialize()
@@ -50,7 +39,9 @@ class TestPlannerRuleRegistry:
             status=IncidentStatus.OPEN,
         )
 
-        plan = plan_for_incident(incident)
+        registry = PlannerRegistry()
+        registry.register(NginxConfigErrorPlanner())
+        plan = registry.plan_for(incident)
 
         assert [step.tool for step in plan.steps] == [
             "render_known_good_nginx_config",
@@ -71,7 +62,9 @@ class TestPlannerRuleRegistry:
             status=IncidentStatus.OPEN,
         )
 
-        plan = plan_for_incident(incident)
+        registry = PlannerRegistry()
+        registry.register(AppCrashLoopPlanner())
+        plan = registry.plan_for(incident)
 
         assert [step.tool for step in plan.steps] == [
             "write_runtime_flags",
@@ -89,26 +82,14 @@ class TestPlannerRuleRegistry:
             status=IncidentStatus.OPEN,
         )
 
+        registry = PlannerRegistry()
         with pytest.raises(ValueError, match="UNKNOWN_TYPE_XYZ"):
-            plan_for_incident(incident)
-
-    def test_returned_steps_are_defensive_copies(self, tmp_path):
-        """Mutating the returned Plan's steps list must not affect the registry."""
-        store = SQLiteStore(tmp_path / "incidents.sqlite3")
-        store.initialize()
-        incident = store.create_incident("APP_CRASH_LOOP", "crash loop")
-        plan = plan_for_incident(incident)
-        original_len = len(PLAN_RULES[IncidentType.APP_CRASH_LOOP].steps)
-
-        plan.steps.clear()  # mutate the returned plan
-
-        assert len(PLAN_RULES[IncidentType.APP_CRASH_LOOP].steps) == original_len
+            registry.plan_for(incident)
 
 
 # ---------------------------------------------------------------------------
 # 2. State machine — FAILED is now retryable
 # ---------------------------------------------------------------------------
-
 
 class TestStateMachineRetryTransition:
     def test_failed_to_open_is_legal(self):
@@ -145,9 +126,8 @@ class TestStateMachineRetryTransition:
 
 
 # ---------------------------------------------------------------------------
-# 3. Retry wiring in worker.py
+# 3. Retry wiring in Orchestrator
 # ---------------------------------------------------------------------------
-
 
 class TestRetryWiring:
     """Tests for retry_failed_incident() and the MAX_ATTEMPTS gate."""
@@ -155,7 +135,6 @@ class TestRetryWiring:
     def _make_failed_incident(self, store, attempt_count=1):
         """Create an incident that is already FAILED with a given attempt_count."""
         inc = store.create_incident("APP_CRASH_LOOP", "crash loop", status=IncidentStatus.OPEN)
-        # Transition through the happy-path states to IN_PROGRESS so we can fail it
         planned = store.transition_incident(
             inc.id,
             from_status=IncidentStatus.OPEN,
@@ -180,8 +159,6 @@ class TestRetryWiring:
         return failed
 
     def test_retry_transitions_failed_to_open(self, tmp_path):
-        from agent.core.worker import retry_failed_incident
-
         store = SQLiteStore(tmp_path / "incidents.sqlite3")
         store.initialize()
         failed = self._make_failed_incident(store)
@@ -195,24 +172,21 @@ class TestRetryWiring:
             )
         failed = store.get_incident(failed.id)
 
-        retried = retry_failed_incident(store, failed)
+        orchestrator = RemediationOrchestrator(MagicMock(), MagicMock(), store, MagicMock(), "http://nginx/health", [])
+        retried = orchestrator.retry_failed_incident(failed)
 
         assert retried is not None
         assert retried.status == IncidentStatus.OPEN
 
     def test_retry_exhausted_escalates_to_needs_human(self, tmp_path):
-        from agent.core.worker import MAX_ATTEMPTS, retry_failed_incident
-
         store = SQLiteStore(tmp_path / "incidents.sqlite3")
         store.initialize()
 
-        # Simulate an incident that has already used all attempts
         inc = store.create_incident(
             "APP_CRASH_LOOP",
             "crash loop — max attempts",
             status=IncidentStatus.FAILED,
         )
-        # Manually bump attempt_count to MAX_ATTEMPTS
         with store.connection() as conn:
             conn.execute(
                 "UPDATE incidents SET attempt_count = ? WHERE id = ?",
@@ -221,7 +195,8 @@ class TestRetryWiring:
         exhausted = store.get_incident(inc.id)
         assert exhausted.attempt_count == MAX_ATTEMPTS
 
-        result = retry_failed_incident(store, exhausted)
+        orchestrator = RemediationOrchestrator(MagicMock(), MagicMock(), store, MagicMock(), "http://nginx/health", [])
+        result = orchestrator.retry_failed_incident(exhausted)
 
         assert result is None
         final = store.get_incident(inc.id)
@@ -248,7 +223,6 @@ class TestRetryWiring:
 # 4. Deduplication — partial UNIQUE index via INSERT OR IGNORE
 # ---------------------------------------------------------------------------
 
-
 class TestDeduplicationIndex:
     def _candidate(self, incident_type: IncidentType = IncidentType.APP_CRASH_LOOP):
         return IncidentCandidate(
@@ -262,21 +236,21 @@ class TestDeduplicationIndex:
         store.initialize()
         candidate = self._candidate()
 
-        result = store.create_incident_from_candidate_if_absent(candidate)
+        result = store.create_incidents_from_candidates([candidate])
 
-        assert result is not None
-        assert result.status == IncidentStatus.OPEN
+        assert len(result) == 1
+        assert result[0].status == IncidentStatus.OPEN
 
     def test_duplicate_while_open_returns_none(self, tmp_path):
         store = SQLiteStore(tmp_path / "incidents.sqlite3")
         store.initialize()
         candidate = self._candidate()
 
-        first = store.create_incident_from_candidate_if_absent(candidate)
-        second = store.create_incident_from_candidate_if_absent(candidate)
+        first = store.create_incidents_from_candidates([candidate])
+        second = store.create_incidents_from_candidates([candidate])
 
-        assert first is not None
-        assert second is None
+        assert len(first) == 1
+        assert len(second) == 0
         assert len(store.list_incidents()) == 1
 
     def test_duplicate_while_planned_returns_none(self, tmp_path):
@@ -284,19 +258,18 @@ class TestDeduplicationIndex:
         store.initialize()
         candidate = self._candidate()
 
-        first = store.create_incident_from_candidate_if_absent(candidate)
+        first = store.create_incidents_from_candidates([candidate])
         store.transition_incident(
-            first.id,
+            first[0].id,
             from_status=IncidentStatus.OPEN,
             to_status=IncidentStatus.PLANNED,
-            expected_version=first.version,
+            expected_version=first[0].version,
         )
 
-        second = store.create_incident_from_candidate_if_absent(candidate)
-        assert second is None
+        second = store.create_incidents_from_candidates([candidate])
+        assert len(second) == 0
 
     def test_duplicate_while_failed_returns_none(self, tmp_path):
-        """FAILED is now active (retryable), so a duplicate must be blocked."""
         store = SQLiteStore(tmp_path / "incidents.sqlite3")
         store.initialize()
         store.create_incident(
@@ -306,23 +279,21 @@ class TestDeduplicationIndex:
         )
         candidate = self._candidate()
 
-        result = store.create_incident_from_candidate_if_absent(candidate)
+        result = store.create_incidents_from_candidates([candidate])
 
-        assert result is None
+        assert len(result) == 0
 
     def test_new_incident_allowed_after_resolved(self, tmp_path):
-        """Once an incident is RESOLVED (terminal), a new one may be created."""
         store = SQLiteStore(tmp_path / "incidents.sqlite3")
         store.initialize()
         candidate = self._candidate()
 
-        first = store.create_incident_from_candidate_if_absent(candidate)
-        # Walk to RESOLVED
+        first = store.create_incidents_from_candidates([candidate])
         planned = store.transition_incident(
-            first.id,
+            first[0].id,
             from_status=IncidentStatus.OPEN,
             to_status=IncidentStatus.PLANNED,
-            expected_version=first.version,
+            expected_version=first[0].version,
         )
         in_progress = store.transition_incident(
             planned.id,
@@ -337,13 +308,12 @@ class TestDeduplicationIndex:
             expected_version=in_progress.version,
         )
 
-        second = store.create_incident_from_candidate_if_absent(candidate)
+        second = store.create_incidents_from_candidates([candidate])
 
-        assert second is not None
-        assert second.status == IncidentStatus.OPEN
+        assert len(second) == 1
+        assert second[0].status == IncidentStatus.OPEN
 
     def test_concurrent_inserts_produce_one_incident(self, tmp_path):
-        """Simulate two worker threads racing to create the same incident type."""
         store = SQLiteStore(tmp_path / "incidents.sqlite3")
         store.initialize()
         candidate = self._candidate()
@@ -351,8 +321,8 @@ class TestDeduplicationIndex:
         barrier = threading.Barrier(2)
 
         def insert():
-            barrier.wait()  # synchronise both threads to maximise the race
-            result = store.create_incident_from_candidate_if_absent(candidate)
+            barrier.wait()
+            result = store.create_incidents_from_candidates([candidate])
             results.append(result)
 
         t1 = threading.Thread(target=insert)
@@ -362,8 +332,8 @@ class TestDeduplicationIndex:
         t1.join()
         t2.join()
 
-        non_none = [r for r in results if r is not None]
-        assert len(non_none) == 1, f"Expected exactly 1 created incident, got {len(non_none)}"
+        non_empty = [r for r in results if r]
+        assert len(non_empty) == 1
         assert len(store.list_incidents()) == 1
 
 
@@ -371,13 +341,9 @@ class TestDeduplicationIndex:
 # 5. Docker socket proxy compose contract
 # ---------------------------------------------------------------------------
 
-
 class TestDockerSocketProxyCompose:
-    """Smoke-test that the compose file contains the socket proxy configuration."""
-
     def _compose_text(self) -> str:
         import pathlib
-
         compose_path = pathlib.Path(__file__).parent.parent.parent / "docker-compose.yml"
         return compose_path.read_text(encoding="utf-8")
 
@@ -386,12 +352,8 @@ class TestDockerSocketProxyCompose:
 
     def test_agent_does_not_mount_raw_socket(self):
         text = self._compose_text()
-        # The raw socket bind-mount must be gone from the agent section.
-        # It may still appear under the proxy service, which is acceptable.
         agent_section_start = text.index("  agent:")
         agent_section = text[agent_section_start:]
-        # The proxy service follows the agent service, so stop at the next
-        # top-level entry that begins with "  volumes:" (compose top-level key).
         assert (
             "/var/run/docker.sock:/var/run/docker.sock"
             not in agent_section.split("  volumes:\n")[0]

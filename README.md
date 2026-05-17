@@ -31,19 +31,19 @@ graph TD
     end
     
     subgraph Incident Controller
-        Worker[Polling Worker]
+        Orchestrator[Remediation Orchestrator]
         API[FastAPI Read-Only API]
-        Planner[Rule-Composition Planner]
+        Registry[Planner Registry]
         SM[Incident State Machine]
         DB[(SQLite Store)]
     end
     
-    Worker -- "TCP (Internal Net)" --> DSP
+    Orchestrator -- "TCP (Internal Net)" --> DSP
     DSP -- "Secured Socket" --> DockerSocket[(Docker Socket)]
     
-    Worker -- "Atomic Pipeline" --> DB
-    Worker -- "Transitions" --> SM
-    Worker -- "Generate Plans" --> Planner
+    Orchestrator -- "Atomic Pipeline" --> DB
+    Orchestrator -- "Transitions" --> SM
+    Orchestrator -- "Strategy Dispatch" --> Registry
     API -- "Query" --> DB
 ```
 
@@ -52,10 +52,11 @@ graph TD
 | Component | Technical Description |
 | :--- | :--- |
 | **Transport Security** | Uses `docker-socket-proxy` over an internal TCP network instead of a raw `/var/run/docker.sock` mount to limit privileges. |
-| **Pipeline Atomicity** | The `observe -> detect -> persist` loop runs inside a single SQLite transaction to avoid partial state writes. |
+| **Orchestrator** | A dedicated `RemediationOrchestrator` coordinates the `Observe → Detect → Persist → Plan` pipeline cleanly. |
+| **Pipeline Atomicity** | The pipeline runs inside a single `SQLiteStore.transaction()` context to avoid partial state writes and TOCTOU vulnerabilities. |
 | **Deduplication** | Unique constraints and `INSERT OR IGNORE` ensure identical concurrent observations don't create duplicate incidents. |
-| **Remediation Planner** | A simple rule evaluation system maps anomalies against known failure signatures to construct steps for a fix. |
-| **Failure Resiliency** | An `IncidentStateMachine` manages lifecycles, retrying failed remediations with exponential backoff up to 3 times. |
+| **Planner Registry** | A dynamic strategy pattern (`PlannerRegistry`) maps anomalies against discrete rule classes (e.g., `AppCrashLoopPlanner`) and decorators (`RetryAwarePlanner`). |
+| **Failure Resiliency** | An `IncidentStateMachine` manages lifecycles, retrying failed remediations with exponential backoff up to 3 times via the orchestrator. |
 | **Security Boundaries** | Uses `pathlib.Path.resolve` to prevent directory traversal during file-read/write tool operations. |
 
 ---
