@@ -223,3 +223,22 @@ def decode_docker_log_bytes(body: bytes) -> str:
     if chunks and index == len(body):
         return b"".join(chunks).decode("utf-8", errors="replace")
     return body.decode("utf-8", errors="replace")
+
+
+def build_docker_client() -> DockerSocketClient | DockerTCPClient:
+    """Return a Docker API client configured from environment variables.
+
+    Resolution order
+    ----------------
+    1. ``DOCKER_HOST=tcp://host[:port]``  → :class:`DockerTCPClient`
+    2. ``DOCKER_SOCKET_PATH=/path/to/docker.sock`` (non-empty) → :class:`DockerSocketClient`.
+    3. Default Unix socket ``/var/run/docker.sock`` → :class:`DockerSocketClient`.
+    """
+    import os
+    docker_host = os.environ.get("DOCKER_HOST", "").strip()
+    if docker_host.startswith("tcp://"):
+        host, port = parse_tcp_docker_host(docker_host)
+        return DockerTCPClient(host=host, port=port)
+
+    socket_path = os.environ.get("DOCKER_SOCKET_PATH", "").strip() or "/var/run/docker.sock"
+    return DockerSocketClient(socket_path)

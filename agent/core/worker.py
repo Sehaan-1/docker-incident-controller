@@ -8,7 +8,7 @@ from collections.abc import Sequence
 from threading import Event
 
 from agent.core.logs import setup_logging
-from agent.observer.docker_socket import DockerSocketClient, DockerTCPClient, parse_tcp_docker_host
+from agent.observer.docker_socket import DockerSocketClient, DockerTCPClient, parse_tcp_docker_host, build_docker_client
 from agent.observer.health import UrllibHealthClient
 from agent.observer.observer import DockerClient, HealthClient
 from agent.storage.sqlite_store import SQLiteStore
@@ -25,12 +25,6 @@ DEFAULT_DOCKER_SOCKET_PATH = "/var/run/docker.sock"
 DEFAULT_POLL_INTERVAL_S = 2.0
 DEFAULT_SANDBOX_PROJECT = "docker-incident-controller"
 
-def default_docker_client() -> DockerSocketClient | DockerTCPClient:
-    docker_host = os.environ.get("DOCKER_HOST", "").strip()
-    if docker_host.startswith("tcp://"):
-        host, port = parse_tcp_docker_host(docker_host)
-        return DockerTCPClient(host=host, port=port)
-    return DockerSocketClient(os.environ.get("DOCKER_SOCKET_PATH", DEFAULT_DOCKER_SOCKET_PATH))
 
 def default_health_url() -> str:
     return os.environ.get("HEALTH_URL", DEFAULT_HEALTH_URL)
@@ -53,7 +47,7 @@ def build_orchestrator(
     registry.register(RetryAwarePlanner(AppCrashLoopPlanner()))
 
     return RemediationOrchestrator(
-        observer_docker_client=docker_client or default_docker_client(),
+        observer_docker_client=docker_client or build_docker_client(),
         observer_health_client=health_client or UrllibHealthClient(),
         store=store,
         planner_registry=registry,

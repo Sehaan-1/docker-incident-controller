@@ -7,7 +7,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from agent.observer.docker_socket import DockerSocketClient, DockerTCPClient, parse_tcp_docker_host
+from agent.observer.docker_socket import DockerSocketClient, DockerTCPClient, parse_tcp_docker_host, build_docker_client
 from agent.observer.health import UrllibHealthClient
 
 
@@ -53,7 +53,7 @@ def nginx_configtest(config_path: str) -> dict[str, Any]:
             "nginx -t -c /tmp/nginx.conf"
         ),
     ]
-    docker = docker_client()
+    docker = build_docker_client()
     container_name = f"dic-nginx-configtest-{uuid.uuid4().hex[:12]}"
     container_id = docker.create_container(
         image=image,
@@ -86,7 +86,7 @@ def atomic_replace(src: str, dst: str) -> dict[str, Any]:
 def restart_container(name: str) -> dict[str, Any]:
     if name not in {"nginx", "app"}:
         raise ValueError(f"container restart is not allowlisted for: {name}")
-    docker = docker_client()
+    docker = build_docker_client()
     container_id = docker.find_labeled_container_by_role(
         name,
         project=os.environ.get("SANDBOX_PROJECT", "docker-incident-controller"),
@@ -163,23 +163,6 @@ def noop(**kwargs: Any) -> dict[str, Any]:
     return {"status": "noop_executed", "params": kwargs}
 
 
-def docker_client() -> DockerSocketClient:
-    """Return a Docker API client configured from environment variables.
-
-    Resolution order
-    ----------------
-    1. ``DOCKER_HOST=tcp://host[:port]``  → :class:`DockerTCPClient`
-       (used when talking to the tecnativa/docker-socket-proxy in compose).
-    2. ``DOCKER_SOCKET_PATH=/path/to/docker.sock`` (non-empty) → :class:`DockerSocketClient`.
-    3. Default Unix socket ``/var/run/docker.sock`` → :class:`DockerSocketClient`.
-    """
-    docker_host = os.environ.get("DOCKER_HOST", "").strip()
-    if docker_host.startswith("tcp://"):
-        host, port = parse_tcp_docker_host(docker_host)
-        return DockerTCPClient(host=host, port=port)
-
-    socket_path = os.environ.get("DOCKER_SOCKET_PATH", "").strip() or "/var/run/docker.sock"
-    return DockerSocketClient(socket_path)
 
 
 def nginx_conf_dir() -> Path:

@@ -13,8 +13,7 @@ from __future__ import annotations
 
 import pytest
 
-from agent.observer.docker_socket import DockerSocketClient, DockerTCPClient, parse_tcp_docker_host
-from agent.tools.remediation import docker_client
+from agent.observer.docker_socket import DockerSocketClient, DockerTCPClient, parse_tcp_docker_host, build_docker_client
 
 
 # ---------------------------------------------------------------------------
@@ -70,7 +69,7 @@ class TestDockerClientFactory:
     ) -> None:
         monkeypatch.setenv("DOCKER_HOST", "tcp://docker-socket-proxy:2375")
         monkeypatch.delenv("DOCKER_SOCKET_PATH", raising=False)
-        client = docker_client()
+        client = build_docker_client()
         assert isinstance(client, DockerTCPClient)
         assert client.host == "docker-socket-proxy"
         assert client.port == 2375
@@ -80,7 +79,7 @@ class TestDockerClientFactory:
     ) -> None:
         """DockerTCPClient must be a subclass of DockerSocketClient (Liskov)."""
         monkeypatch.setenv("DOCKER_HOST", "tcp://proxy:2375")
-        client = docker_client()
+        client = build_docker_client()
         assert isinstance(client, DockerSocketClient)
 
     def test_returns_unix_client_with_explicit_socket_path(
@@ -88,7 +87,7 @@ class TestDockerClientFactory:
     ) -> None:
         monkeypatch.delenv("DOCKER_HOST", raising=False)
         monkeypatch.setenv("DOCKER_SOCKET_PATH", "/custom/docker.sock")
-        client = docker_client()
+        client = build_docker_client()
         assert isinstance(client, DockerSocketClient)
         assert not isinstance(client, DockerTCPClient)
         assert client.socket_path == "/custom/docker.sock"
@@ -98,7 +97,7 @@ class TestDockerClientFactory:
     ) -> None:
         monkeypatch.delenv("DOCKER_HOST", raising=False)
         monkeypatch.delenv("DOCKER_SOCKET_PATH", raising=False)
-        client = docker_client()
+        client = build_docker_client()
         assert isinstance(client, DockerSocketClient)
         assert not isinstance(client, DockerTCPClient)
         assert client.socket_path == "/var/run/docker.sock"
@@ -109,7 +108,7 @@ class TestDockerClientFactory:
         """Regression: DOCKER_SOCKET_PATH='' must not create DockerSocketClient('')."""
         monkeypatch.delenv("DOCKER_HOST", raising=False)
         monkeypatch.setenv("DOCKER_SOCKET_PATH", "")
-        client = docker_client()
+        client = build_docker_client()
         assert isinstance(client, DockerSocketClient)
         assert not isinstance(client, DockerTCPClient)
         assert client.socket_path == "/var/run/docker.sock"
@@ -120,12 +119,12 @@ class TestDockerClientFactory:
         """DOCKER_HOST wins even when DOCKER_SOCKET_PATH is also set."""
         monkeypatch.setenv("DOCKER_HOST", "tcp://proxy:2375")
         monkeypatch.setenv("DOCKER_SOCKET_PATH", "/var/run/docker.sock")
-        client = docker_client()
+        client = build_docker_client()
         assert isinstance(client, DockerTCPClient)
 
     def test_empty_docker_host_does_not_trigger_tcp(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("DOCKER_HOST", "")
         monkeypatch.delenv("DOCKER_SOCKET_PATH", raising=False)
-        client = docker_client()
+        client = build_docker_client()
         assert not isinstance(client, DockerTCPClient)
         assert client.socket_path == "/var/run/docker.sock"

@@ -12,6 +12,8 @@ services:
     volumes:
       - runtime:/runtime
       - nginx_conf:/nginx_conf
+      - ./services/app/runtime/flags.json:/workspace/services/app/runtime/flags.json:ro
+      - ./services/nginx/site.conf:/workspace/services/nginx/site.conf:ro
 
   app:
     build:
@@ -91,6 +93,7 @@ services:
       - agent_data:/data
       - runtime:/runtime
       - nginx_conf:/nginx_conf
+      - ./services/nginx/site.conf:/workspace/services/nginx/site.conf:ro
     networks:
       - default
       - socket_proxy
