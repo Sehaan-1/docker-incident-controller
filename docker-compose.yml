@@ -1,0 +1,107 @@
+services:
+  config-init:
+    build: .
+    command:
+      - sh
+      - -c
+      - |
+        rm -f /nginx_conf/*.conf
+        cp /workspace/services/app/runtime/flags.json /runtime/flags.json
+        cp /workspace/services/nginx/site.conf /nginx_conf/site.conf
+        echo "Initialized runtime and nginx config volumes."
+    volumes:
+      - runtime:/runtime
+      - nginx_conf:/nginx_conf
+
+  app:
+    build:
+      context: ./services/app
+    environment:
+      RUNTIME_FLAGS_PATH: /runtime/flags.json
+    labels:
+      sre.demo: "true"
+      sre.demo.role: "app"
+    restart: unless-stopped
+    depends_on:
+      config-init:
+        condition: service_completed_successfully
+    volumes:
+      - runtime:/runtime:ro
+
+  nginx:
+    image: nginx:1.27-alpine
+    labels:
+      sre.demo: "true"
+      sre.demo.role: "nginx"
+    restart: unless-stopped
+    depends_on:
+      config-init:
+        condition: service_completed_successfully
+      app:
+        condition: service_started
+    ports:
+      - "${NGINX_PORT:-8080}:80"
+    volumes:
+      - nginx_conf:/etc/nginx/conf.d:ro
+
+  # ---------------------------------------------------------------------------
+  # Docker socket proxy — limits what the agent can do via the Docker API.
+  # Only the endpoints explicitly set to "1" are forwarded; everything else
+  # returns 403.  This confines a compromised agent to read-only container
+  # inspection + the restart action needed for remediation.
+  # ---------------------------------------------------------------------------
+  docker-socket-proxy:
+    image: tecnativa/docker-socket-proxy:0.3.0
+    restart: unless-stopped
+    environment:
+      # Read-only endpoints the observer needs.
+      CONTAINERS: 1
+      EVENTS: 1
+      INFO: 1
+      VERSION: 1
+      # Write endpoint the remediation runner needs (restart_container tool).
+      POST: 1
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    networks:
+      - socket_proxy
+
+  agent:
+    build: .
+    environment:
+      INCIDENT_DB_PATH: /data/incidents.sqlite3
+      RUNTIME_DIR: /runtime
+      NGINX_CONF_DIR: /nginx_conf
+      # Talk to the proxy, not the raw host socket.
+      DOCKER_HOST: tcp://docker-socket-proxy:2375
+      DOCKER_SOCKET_PATH: ""
+      HEALTH_URL: http://nginx/health
+      AGENT_POLL_INTERVAL_S: "2"
+      DOCKER_NETWORK: ${COMPOSE_PROJECT_NAME:-docker-incident-controller}_default
+      NGINX_CONF_VOLUME: ${COMPOSE_PROJECT_NAME:-docker-incident-controller}_nginx_conf
+      SANDBOX_PROJECT: ${COMPOSE_PROJECT_NAME:-docker-incident-controller}
+    depends_on:
+      config-init:
+        condition: service_completed_successfully
+      docker-socket-proxy:
+        condition: service_started
+    ports:
+      - "${AGENT_PORT:-8000}:8000"
+    volumes:
+      - agent_data:/data
+      - runtime:/runtime
+      - nginx_conf:/nginx_conf
+    networks:
+      - default
+      - socket_proxy
+
+volumes:
+  agent_data:
+  runtime:
+  nginx_conf:
+
+networks:
+  default: {}
+  # Isolated network so only the agent can reach the socket proxy.
+  socket_proxy:
+    internal: true
