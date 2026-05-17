@@ -185,6 +185,15 @@ class TestRetryWiring:
         store = SQLiteStore(tmp_path / "incidents.sqlite3")
         store.initialize()
         failed = self._make_failed_incident(store)
+        
+        # Bypass backoff check
+        import datetime
+        with store.connection() as conn:
+            conn.execute(
+                "UPDATE incidents SET updated_at = ? WHERE id = ?",
+                ((datetime.datetime.now(datetime.UTC) - datetime.timedelta(seconds=60)).isoformat(), failed.id)
+            )
+        failed = store.get_incident(failed.id)
 
         retried = retry_failed_incident(store, failed)
 
