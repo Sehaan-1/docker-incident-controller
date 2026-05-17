@@ -55,9 +55,11 @@ graph TD
 | **Orchestrator** | A dedicated `RemediationOrchestrator` coordinates the `Observe → Detect → Persist → Plan` pipeline cleanly. |
 | **Pipeline Atomicity** | The pipeline runs inside a single `SQLiteStore.transaction()` context to avoid partial state writes and TOCTOU vulnerabilities. |
 | **Deduplication** | Unique constraints and `INSERT OR IGNORE` ensure identical concurrent observations don't create duplicate incidents. |
-| **Planner Registry** | A dynamic strategy pattern (`PlannerRegistry`) maps anomalies against discrete rule classes (e.g., `AppCrashLoopPlanner`) and decorators (`RetryAwarePlanner`). |
+| **Planner Registry** | A dynamic strategy pattern (`PlannerRegistry`) maps anomalies against discrete rule classes (e.g., `AppCrashLoopPlanner`) and decorators (`RetryAwarePlanner`, which injects fallback tools like `noop`). |
 | **Failure Resiliency** | An `IncidentStateMachine` manages lifecycles, retrying failed remediations with exponential backoff up to 3 times via the orchestrator. |
 | **Security Boundaries** | Uses `pathlib.Path.resolve` to prevent directory traversal during file-read/write tool operations. |
+| **Config Separation** | `Dockerfile` cleanly separates code from configuration by relying on Docker `volumes` (bind mounts) instead of statically baking configurations into the image. |
+| **Code Hygiene** | DRY principles are enforced (e.g., centralized `build_docker_client` factory), and the package architecture is cleanly scoped with complete module hierarchies. |
 
 ---
 
