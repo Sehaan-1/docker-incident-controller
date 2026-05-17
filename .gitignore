@@ -1,0 +1,25 @@
+.data/
+.pytest_cache/
+.ruff_cache/
+__pycache__/
+*.py[cod]
+*.sqlite3
+*.sqlite3-shm
+*.sqlite3-wal
+*.egg-info/
+.venv/
+venv/
+
+# Environment Variables
+.env
+
+# Coverage Reports
+.coverage
+htmlcov/
+
+# IDE and Editor Files
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
