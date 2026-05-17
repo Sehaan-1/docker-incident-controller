@@ -7,8 +7,6 @@ WORKDIR /workspace
 
 COPY pyproject.toml ./
 COPY agent ./agent
-COPY services/app/runtime/flags.json ./services/app/runtime/flags.json
-COPY services/nginx/site.conf ./services/nginx/site.conf
 
 RUN pip install --no-cache-dir .
 

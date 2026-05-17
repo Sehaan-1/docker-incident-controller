@@ -339,43 +339,7 @@ class SQLiteStore:
             raise RuntimeError("created incident could not be read back")
         return incident
 
-    def create_incident_from_candidate_if_absent(
-        self,
-        candidate: IncidentCandidate,
-    ) -> IncidentRecord | None:
-        now = encode_dt(utc_now())
-        incident_id = str(uuid.uuid4())
-        with self.connection() as conn:
-            # Atomic INSERT OR IGNORE: the partial UNIQUE index on
-            # incidents(type) WHERE status IN active statuses ensures that at
-            # most one concurrent worker wins the INSERT race.  The loser
-            # silently ignores the conflict and returns None.
-            cursor = conn.execute(
-                """
-                INSERT OR IGNORE INTO incidents (
-                    id, type, status, summary, created_at, updated_at,
-                    version, attempt_count, last_error_json
-                )
-                VALUES (?, ?, ?, ?, ?, ?, 0, 0, ?)
-                """,
-                (
-                    incident_id,
-                    candidate.type.value,
-                    IncidentStatus.OPEN.value,
-                    candidate.summary,
-                    now,
-                    now,
-                    encode_json({"evidence": candidate.evidence}),
-                ),
-            )
-            if cursor.rowcount == 0:
-                # Conflict: an active incident of this type already exists.
-                return None
 
-        incident = self.get_incident(incident_id)
-        if incident is None:
-            raise RuntimeError("created incident could not be read back")
-        return incident
 
     def list_incidents(self, status: IncidentStatus | None = None) -> list[IncidentRecord]:
         with self.connection() as conn:

@@ -158,6 +158,11 @@ def verify_health_stable(
     )
 
 
+def noop(**kwargs: Any) -> dict[str, Any]:
+    """A no-op tool used for demonstration of dynamic planner steps (e.g., rollback)."""
+    return {"status": "noop_executed", "params": kwargs}
+
+
 def docker_client() -> DockerSocketClient:
     """Return a Docker API client configured from environment variables.
 

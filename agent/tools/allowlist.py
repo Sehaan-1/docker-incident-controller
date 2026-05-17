@@ -10,6 +10,7 @@ from agent.tools.remediation import (
     restart_container,
     verify_health_stable,
     write_runtime_flags,
+    noop,
 )
 
 
@@ -23,6 +24,7 @@ TOOL_REGISTRY: dict[str, ToolFn] = {
     "restart_container": restart_container,
     "write_runtime_flags": write_runtime_flags,
     "verify_health_stable": verify_health_stable,
+    "noop": noop,
 }
 
 
