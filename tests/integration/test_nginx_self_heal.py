@@ -131,7 +131,7 @@ def wait_json(url: str, timeout_s: float) -> object:
     while time.monotonic() < deadline:
         try:
             return get_json(url)
-        except (URLError, TimeoutError, json.JSONDecodeError, RemoteDisconnected) as exc:
+        except (URLError, TimeoutError, json.JSONDecodeError, RemoteDisconnected, ConnectionResetError, ConnectionError) as exc:
             last_error = exc
             time.sleep(0.5)
     raise TimeoutError(f"{url} did not become ready: {last_error}")
@@ -142,12 +142,15 @@ def wait_incident_terminal(
 ) -> dict[str, object]:
     deadline = time.monotonic() + timeout_s
     while time.monotonic() < deadline:
-        incidents = get_json(f"{base_url}/incidents")
-        for incident in incidents:
-            if incident["type"] != incident_type:
-                continue
-            if incident["status"] in {"RESOLVED", "FAILED", "NEEDS_HUMAN"}:
-                return incident
+        try:
+            incidents = get_json(f"{base_url}/incidents")
+            for incident in incidents:
+                if incident["type"] != incident_type:
+                    continue
+                if incident["status"] in {"RESOLVED", "FAILED", "NEEDS_HUMAN"}:
+                    return incident
+        except (URLError, TimeoutError, json.JSONDecodeError, RemoteDisconnected, ConnectionResetError, ConnectionError):
+            pass
         time.sleep(1)
     raise TimeoutError(f"{incident_type} did not reach terminal status")
 
