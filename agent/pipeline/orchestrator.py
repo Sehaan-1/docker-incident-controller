@@ -1,10 +1,8 @@
 from __future__ import annotations
 
 import logging
-from collections.abc import Sequence
 from datetime import UTC, datetime
 from threading import Event
-from typing import Any
 
 from agent.detector.rules import detect as detect_candidates
 from agent.executor.runner import execute_plan

@@ -20,7 +20,7 @@ from agent.models.incident import (
 )
 from agent.models.plan import Plan, PlanRecord
 from agent.models.state_machine import IncidentStateMachine
-from agent.observer.observer import Observation, ObservationsBundle
+from agent.observer.observer import Observation
 
 
 DEFAULT_DB_PATH = Path(".data/incidents.sqlite3")

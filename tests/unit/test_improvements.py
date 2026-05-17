@@ -20,7 +20,6 @@ from agent.models.state_machine import IncidentStateMachine, InvalidTransitionEr
 from agent.planner.registry import PlannerRegistry
 from agent.planner.strategies.nginx import NginxConfigErrorPlanner
 from agent.planner.strategies.app_crash import AppCrashLoopPlanner
-from agent.planner.strategies.retry_aware import RetryAwarePlanner
 from agent.pipeline.orchestrator import RemediationOrchestrator, MAX_ATTEMPTS
 from agent.storage.sqlite_store import SQLiteStore
 
