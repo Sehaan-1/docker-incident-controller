@@ -121,6 +121,11 @@ def retry_failed_incident(store: SQLiteStore, incident: IncidentRecord) -> Incid
         )
         return None
 
+    # Exponential backoff: 2s, 4s, 8s based on attempt count
+    backoff_seconds = 2 ** (incident.attempt_count + 1)
+    if (datetime.now(UTC) - incident.updated_at).total_seconds() < backoff_seconds:
+        return None
+
     try:
         retried = store.transition_incident(
             incident.id,

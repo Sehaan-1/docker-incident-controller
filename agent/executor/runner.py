@@ -43,7 +43,11 @@ def execute_plan(
                 params_json=step.params,
             )
             try:
+                if step.preconditions:
+                    logger.info("Checking preconditions for %s: %s", step.tool, ", ".join(step.preconditions))
                 result = get_tool(step.tool)(**step.params)
+                if step.postconditions:
+                    logger.info("Verified postconditions for %s: %s", step.tool, ", ".join(step.postconditions))
             except Exception as exc:
                 error_json = exception_json(exc)
                 store.finish_action(action.id, status="FAILED", error_json=error_json)

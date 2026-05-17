@@ -7,7 +7,7 @@
 <h1 align="center">Docker Incident Controller</h1>
 
 <p align="center">
-  <strong>Autonomous container observation, anomaly detection, and stateful remediation.</strong>
+  <strong>A proof-of-concept Python agent that monitors local Docker containers and automatically executes hardcoded remediation rules.</strong>
 </p>
 
 <p align="center">
@@ -18,9 +18,9 @@
 
 ---
 
-## System Architecture Overview
+## What It Is
 
-The Docker Incident Controller is an autonomous agent designed to run alongside a target workload. It continuously polls container state through a secured TCP proxy, evaluates container metrics against known failure signatures, and executes targeted, Python-based remediation procedures (such as configuration rollbacks or restarting failed components).
+The Docker Incident Controller is an experimental script designed to demonstrate how a local Python worker can observe Docker containers through a proxy and attempt to fix predefined issues. It polls the container state, matches anomalies to a small set of known failure signatures (e.g., an Nginx configuration syntax error), and runs basic remediation plans such as replacing the config and restarting the container.
 
 ```mermaid
 graph TD
@@ -47,18 +47,16 @@ graph TD
     API -- "Query" --> DB
 ```
 
-## Core System Features
+## System Implementation
 
-| System Component | Implementation | Technical Description |
-| :--- | :--- | :--- |
-| **Transport Security** | `docker-socket-proxy` | The agent communicates exclusively via a secured internal TCP proxy. Raw Docker socket (`/var/run/docker.sock`) mounts are strictly avoided, limiting the agent's privileges to a subset of the Docker API. |
-| **Pipeline Atomicity** | SQLite Transactions | The core polling loop executes an `observe -> detect -> persist` sequence. This sequence is wrapped within a single database transaction to guarantee that system state anomalies and resulting incident records are consistently committed or rolled back together. |
-| **Deduplication** | Unique Constraints | Incident deduplication is enforced at the data layer. A partial unique index combined with `INSERT OR IGNORE` ensures identical concurrent observations map to a single unified incident. |
-| **Remediation Planner** | Rule-Composition | Instead of hardcoded procedures, a dynamic rule evaluation system maps detected anomalies against a registry of failure signatures to construct explicit, validated step-by-step remediation plans. |
-| **Failure Resiliency** | `IncidentStateMachine` | Explicit state transitions govern incident lifecycles. Remediation failures automatically transition the incident from `FAILED` back to `OPEN`, allowing up to 3 automated retry attempts before escalating to human intervention. |
-| **Security Boundaries** | `pathlib.Path.resolve` | All file-read and file-write operations (such as editing proxy configurations) utilize strict path confinement logic to mitigate directory traversal vulnerabilities. |
-| **Observability** | JSON logs & `/metrics` | The system emits structured JSON logs for programmatic aggregation and exposes a Prometheus-compatible `/metrics` endpoint to track incident counts, remediation actions, and retry rates. |
-| **Data Serialization** | Strict Pydantic | Pydantic data models disable enum value coercion (`use_enum_values=False`) to enforce strict type checking and defend against implicit deserialization errors. |
+| Component | Technical Description |
+| :--- | :--- |
+| **Transport Security** | Uses `docker-socket-proxy` over an internal TCP network instead of a raw `/var/run/docker.sock` mount to limit privileges. |
+| **Pipeline Atomicity** | The `observe -> detect -> persist` loop runs inside a single SQLite transaction to avoid partial state writes. |
+| **Deduplication** | Unique constraints and `INSERT OR IGNORE` ensure identical concurrent observations don't create duplicate incidents. |
+| **Remediation Planner** | A simple rule evaluation system maps anomalies against known failure signatures to construct steps for a fix. |
+| **Failure Resiliency** | An `IncidentStateMachine` manages lifecycles, retrying failed remediations with exponential backoff up to 3 times. |
+| **Security Boundaries** | Uses `pathlib.Path.resolve` to prevent directory traversal during file-read/write tool operations. |
 
 ---
 
@@ -106,17 +104,16 @@ docker compose up --build
 | Service | URL | Description |
 | :--- | :--- | :--- |
 | **Agent API** | `http://localhost:8000` | Root API access exposing agent metadata. |
-| **Metrics** | `http://localhost:8000/metrics` | Prometheus metrics for health tracking and SLA monitoring. |
-| **Incidents** | `http://localhost:8000/incidents` | Read-only access to query current and historical incident data. |
-| **Observations** | `http://localhost:8000/observations?limit=100` | Raw container states and health-check outputs recorded during polling. |
-| **App Health** | `http://localhost:8080/health` | The health endpoint of the target application being monitored. |
+| **Metrics** | `http://localhost:8000/metrics` | Prometheus metrics for health tracking. |
+| **Incidents** | `http://localhost:8000/incidents` | Read-only access to query incident data. |
+| **Observations** | `http://localhost:8000/observations?limit=100` | Raw container states and health-check outputs. |
+| **App Health** | `http://localhost:8080/health` | The health endpoint of the target application. |
 
 ### 3. Fault Injection Demo
 
-You can artificially trigger an anomaly within the sandbox to observe the agent's detection and automated remediation capabilities.
+You can artificially trigger an anomaly within the sandbox to see the agent detect and fix it.
 
-**TIP:**
-Run `docker compose logs -f agent` in a separate terminal to watch the state machine transitions and remediation plan execution in real-time.
+**TIP:** Run `docker compose logs -f agent` in a separate terminal to watch the state transitions and remediation plan execute.
 
 **Unix:**
 ```bash
@@ -130,7 +127,7 @@ sh fault_injection/enable_app_crash.sh
 .\fault_injection\enable_app_crash.ps1
 ```
 
-To manually reset the sandbox to a clean state:
+To manually reset the sandbox:
 ```bash
 docker compose down --volumes
 docker compose up --build
@@ -140,7 +137,7 @@ docker compose up --build
 
 ## State Machine Lifecycle
 
-The `IncidentStateMachine` enforces valid transitions to prevent the execution of indeterminate or conflicting remediation plans. 
+The `IncidentStateMachine` ensures valid transitions between states.
 
 ```mermaid
 stateDiagram-v2
@@ -155,28 +152,17 @@ stateDiagram-v2
     IN_PROGRESS --> NEEDS_HUMAN : Unsafe/Unknown
 ```
 
-**NOTE:**
-On startup, the system performs a consistency check. Any incident left in the `IN_PROGRESS` state due to an abrupt shutdown is automatically transitioned to `NEEDS_HUMAN` or `FAILED`. This conservative policy prevents the unsafe resumption of partially executed remediation tasks.
+On startup, any incident left in the `IN_PROGRESS` state due to a shutdown is transitioned to `NEEDS_HUMAN` or `FAILED` to prevent unsafe resumption of tasks.
 
 ---
 
-## Performance Metrics
-
-| Metric | Target / Measurement |
-| :--- | :--- |
-| **p95 Observation Latency** | `< 500ms` (Local execution) |
-| **Incident Recall** | `100%` (For modeled failure signatures) |
-| **Throughput** | `~600 observations/minute` (Dependent on compose footprint) |
-
----
-
-## Known Limitations & Technical Debt
+## Known Limitations
 
 **WARNING:**
-This system is designed as an experimental sandbox to demonstrate agentic capabilities. The following constraints and security considerations apply to the current architecture:
+This system is an experimental proof-of-concept. The following constraints apply:
 
-- **Restricted Mounts**: The agent currently requires direct write access to the local `runtime` and `nginx_conf` volume mounts to execute its remediation plans. In a true production environment, this approach bypasses standard orchestrator-managed configurations (e.g., Kubernetes ConfigMaps) and introduces a potential file-system attack surface.
-- **Single Node Concurrency**: The SQLite persistence layer and the polling mechanism are strictly designed for a single-instance deployment. Running concurrent controller workers will result in database lock contention and duplicate incident execution due to the lack of distributed locking.
-- **Predefined Rule Scope**: The Rule-Composition Planner only handles explicitly defined failure signatures (such as Nginx configuration syntax errors or specific application crash flags). Unrecognized anomalies are ignored and will not trigger generalized LLM-based exploration.
-- **Docker Dependency**: The agent is tightly coupled to the Docker API syntax and object models. It does not natively support Kubernetes orchestration or containerd runtimes.
-- **Transient Error Resilience**: While the main observation loop catches standard `DockerAPIError` exceptions to skip temporarily faulty containers without crashing, a prolonged unavailability of the `docker-socket-proxy` will halt the entire observation pipeline until connectivity is restored.
+- **Restricted Mounts**: The agent requires direct write access to local `runtime` and `nginx_conf` volume mounts to execute fixes. This bypasses standard orchestrator configurations and introduces a file-system attack surface.
+- **Single Node Concurrency**: Designed strictly for a single-instance deployment. Running concurrent workers will cause database lock contention and duplicate execution.
+- **Predefined Rule Scope**: Only handles explicitly hardcoded failure signatures. It does not use LLMs or dynamic heuristics to explore unknown anomalies.
+- **Docker Dependency**: Tightly coupled to the Docker API syntax. It does not support Kubernetes or containerd natively.
+- **Transient Error Resilience**: While the loop skips temporarily faulty containers, prolonged unavailability of the `docker-socket-proxy` will halt observation entirely.
