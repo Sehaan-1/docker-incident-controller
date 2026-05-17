@@ -11,7 +11,6 @@ Tests covering the five architectural improvements:
 from __future__ import annotations
 
 import threading
-from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -291,7 +290,7 @@ class TestDeduplicationIndex:
         """FAILED is now active (retryable), so a duplicate must be blocked."""
         store = SQLiteStore(tmp_path / "incidents.sqlite3")
         store.initialize()
-        inc = store.create_incident(
+        store.create_incident(
             IncidentType.APP_CRASH_LOOP.value,
             "crash loop",
             status=IncidentStatus.FAILED,

@@ -14,11 +14,9 @@ from __future__ import annotations
 
 import json
 
-import pytest
 
 from agent.models.incident import (
     IncidentCandidate,
-    IncidentStatus,
     IncidentType,
     ObservationRecord,
 )
