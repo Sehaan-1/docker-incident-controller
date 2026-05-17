@@ -7,7 +7,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from agent.observer.docker_socket import DockerSocketClient, DockerTCPClient, parse_tcp_docker_host, build_docker_client
+from agent.observer.docker_socket import build_docker_client
 from agent.observer.health import UrllibHealthClient
 
 

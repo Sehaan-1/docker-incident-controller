@@ -8,7 +8,7 @@ from collections.abc import Sequence
 from threading import Event
 
 from agent.core.logs import setup_logging
-from agent.observer.docker_socket import DockerSocketClient, DockerTCPClient, parse_tcp_docker_host, build_docker_client
+from agent.observer.docker_socket import build_docker_client
 from agent.observer.health import UrllibHealthClient
 from agent.observer.observer import DockerClient, HealthClient
 from agent.storage.sqlite_store import SQLiteStore
